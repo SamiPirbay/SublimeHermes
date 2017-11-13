@@ -1,36 +1,55 @@
 from functools import wraps
+from queue import Queue
 import re
 
 import sublime
 from sublime_plugin import TextCommand
 
 
-def chain_callbacks(f):
+class GeneratorWithReturnValue:
+    def __init__(self, gen):
+        self.gen = gen
+        self.value = None
+
+    def __iter__(self):
+        self.value = yield from self.gen
+
+
+def chain_callbacks(keep_value=False):
     # type: Callable[..., Generator[Callable[Callable[...], Any, Any]] -> Callable[..., Any]
-    """Decorator to enable mimicing promise pattern by yield expression.
+    def decorator(f):
+        """Decorator to enable mimicing promise pattern by yield expression.
 
-    Decorator function to make a wrapper which executes functions
-    yielded by the given generator in order."""
-    @wraps(f)
-    def wrapper(*args, **kwargs):
-        chain = f(*args, **kwargs)
-        try:
-            next_f = next(chain)
-        except StopIteration:
-            return
+        Decorator function to make a wrapper which executes functions
+        yielded by the given generator in order."""
+        @wraps(f)
+        def wrapper(*args, **kwargs):
+            print(f)
+            gen = GeneratorWithReturnValue(f(*args, **kwargs))
+            chain = iter(gen)
+            value_queue = Queue(maxsize=1)
 
-        def cb(*args, **kwargs):
-            nonlocal next_f
             try:
-                if len(args) + len(kwargs) != 0:
-                    next_f = chain.send(*args, **kwargs)
-                else:
-                    next_f = next(chain)
-                next_f(cb)
+                next_f = next(chain)
             except StopIteration:
-                return
-        next_f(cb)
-    return wrapper
+                value_queue.put(gen.value)
+
+            def cb(*args, **kwargs):
+                nonlocal next_f
+                try:
+                    if len(args) + len(kwargs) != 0:
+                        next_f = chain.send(*args, **kwargs)
+                    else:
+                        next_f = next(chain)
+                    next_f(cb)
+                except StopIteration:
+                    value_queue.put(gen.value)
+
+            next_f(cb)
+            if keep_value:
+                return value_queue.get()
+        return wrapper
+    return decorator
 
 
 PASSWORD_INPUT_PATTERN = re.compile(r"^(\**)([^*]+)(\**)")

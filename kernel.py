@@ -5,6 +5,7 @@ KernelConnection class provides interaction with Jupyter kernels.
 Copyright (c) 2017, NEGORO Tetsuya (https://github.com/ngr-t)
 """
 
+from functools import partial
 from threading import Thread
 from queue import Queue
 from urllib.parse import quote
@@ -19,6 +20,7 @@ import sublime
 
 from .utils import (
     show_password_input,
+    chain_callbacks,
 )
 
 
@@ -598,7 +600,8 @@ class KernelConnection(object):
     def execution_state(self):
         return self._execution_state
 
-    def get_complete(self, code, cursor_pos, timeout=None):
+    @chain_callbacks(keep_value=True)
+    def get_complete(self, code, cursor_pos):
         """Generate complete request."""
         header = self._gen_header(MSG_TYPE_COMPLETE_REQUEST)
         content = dict(
@@ -615,7 +618,7 @@ class KernelConnection(object):
             content=content,
             metadata={},
             buffers={})
-        reply = self._communicate(message, timeout)
+        reply = yield partial(self._async_communicate, message)
         return reply.matches
 
     def get_inspection(self, code, cursor_pos, detail_level=0, timeout=None):
@@ -636,5 +639,4 @@ class KernelConnection(object):
             content=content,
             metadata={},
             buffers={})
-        reply = self._communicate(message, timeout)
-        self._handle_inspect_reply(reply)
+        self._async_communicate(message, self._handle_inspect_reply)

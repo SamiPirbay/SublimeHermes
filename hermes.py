@@ -272,7 +272,7 @@ class KernelManager(object):
             return
 
 
-@chain_callbacks
+@chain_callbacks()
 def _connect_server(window, *, continue_cb=lambda: None):
     settings = sublime.load_settings("Hermes.sublime-settings")
     connections = settings.get("connections", [])
@@ -321,7 +321,7 @@ class HermesConnectServer(WindowCommand):
         _connect_server(self.window)
 
 
-@chain_callbacks
+@chain_callbacks()
 def _start_kernel(
     window,
     view,
@@ -386,7 +386,7 @@ class ListKernelsSubcommands(object):
     back = "Back to the kernel list"
 
 
-@chain_callbacks
+@chain_callbacks()
 def _list_kernels(window, view, *, logger=HERMES_LOGGER):
     sc = ListKernelsSubcommands
     selected_kernel = yield partial(_show_kernel_selection_menu, window, view, add_new=True)
@@ -461,7 +461,7 @@ class HermesListKernels(TextCommand):
         _list_kernels(sublime.active_window(), self.view)
 
 
-@chain_callbacks
+@chain_callbacks()
 def _connect_kernel(
     window,
     view,
@@ -521,7 +521,7 @@ class HermesConnectKernel(TextCommand):
         _connect_kernel(sublime.active_window(), self.view, logger=logger)
 
 
-@chain_callbacks
+@chain_callbacks()
 def _show_kernel_selection_menu(window, view, cb, *, add_new=False):
     # Get the kurnel ID related to `view` if exists.
     try:
@@ -560,7 +560,7 @@ def _show_kernel_selection_menu(window, view, cb, *, add_new=False):
     cb(selected_kernel)
 
 
-@chain_callbacks
+@chain_callbacks()
 def _interrupt_kernel(
     window,
     view,
@@ -597,7 +597,7 @@ class HermesInterruptKernel(TextCommand):
         _interrupt_kernel(sublime.active_window(), self.view, logger=logger)
 
 
-@chain_callbacks
+@chain_callbacks()
 def _restart_kernel(
     window,
     view,
@@ -634,7 +634,7 @@ class HermesRestartKernel(TextCommand):
         _restart_kernel(sublime.active_window(), self.view, logger=logger)
 
 
-@chain_callbacks
+@chain_callbacks()
 def _shutdown_kernel(
     window,
     view,
@@ -724,7 +724,7 @@ def get_chunk(view: sublime.View, s: sublime.Region) -> str:
     raise NotImplementedError
 
 
-@chain_callbacks
+@chain_callbacks()
 def _execute_block(view, *, logger=HERMES_LOGGER):
     try:
         kernel = ViewManager.get_kernel_for_view(view.buffer_id())
@@ -838,7 +838,7 @@ class HermesGetObjectInspection(TextCommand):
     def is_visible(self, *, logger=HERMES_LOGGER):
         return self.is_enabled()
 
-    @chain_callbacks
+    @chain_callbacks()
     def run(self, edit, *, logger=HERMES_LOGGER):
         view = self.view
         try:
@@ -890,9 +890,13 @@ class HermesCompleter(EventListener):
             location = locations[0]
             code = view.substr(view.line(location))
             _, col = view.rowcol(location)
+            completions = sublime.set_timeout(
+                lambda: kernel.get_complete(code, col),
+                timeout
+            )
             return [
                 (completion + "\tHermes", completion)
                 for completion
-                in kernel.get_complete(code, col, timeout)]
+                in completions]
         except Exception:
             return None
