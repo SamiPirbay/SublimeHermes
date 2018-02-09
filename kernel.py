@@ -305,17 +305,12 @@ class KernelConnection(object):
             return False
 
     def _establish_ws_connection(self, connect_kwargs: dict=dict()) -> None:
-        # Send ping and check if connection is alive.
-        if self._ping():
-            return
-        else:
-            self.sock = None
         try:
             response = self.manager.get_request(self._http_url)
             if response['id'] != self.kernel_id:
-                return
+                return None
         except requests.RequestException:
-            return
+            return None
         if self._auth_type == "no_auth":
             sock = websocket.create_connection(
                 self._ws_url,
@@ -332,12 +327,12 @@ class KernelConnection(object):
             sock = websocket.create_connection(
                 self._ws_url,
                 header=header)
-        self.sock = sock
+        return sock
         if not self._ping():
             # Connection can't be established (ex. when the kernel is dead)
             # Should we show some message in this case,
             # and let users to make a new connection?
-            self.sock = None
+            return None
 
     def _communicate(self, message, timeout=None) -> JupyterReply:
         """Send `message` to the kernel and return `reply` for it."""
@@ -346,63 +341,64 @@ class KernelConnection(object):
             connect_kwargs = dict(timeout=timeout)
         else:
             connect_kwargs = dict()
-        self._establish_ws_connection(connect_kwargs)
-        if self.sock is None:
-            return None
-        self.sock.send(json.dumps(message).encode())
-        replies = []
-        replied = False
-        while True:
-            # The code here requires refactoring.
-            # The code to interpret reply messages is devided into here and `JupyterReply` class.
-            # Maybe it's better choice to remove `JupyterReply` class and
-            # let all message interpretation processed here.
-            reply = json.loads(self.sock.recv())
-            replies.append(reply)
-            self._logger.info(reply)
-            msg_type = get_msg_type(reply)
-            if msg_type.endswith("_reply"):
-                # Kernel sends status first, or XX_reply first?
-                if self._execution_state == 'idle':
-                    break
-                replied = True
-            if msg_type == MSG_TYPE_STATUS:
-                self._execution_state = reply["content"]["execution_state"]
-                if self._execution_state == 'idle' and replied:
-                    break
-            elif msg_type == MSG_TYPE_INPUT_REQUEST:
-                content = reply["content"]
 
-                def send_input(value):
-                    input_reply = dict(
-                        header=self._gen_header(MSG_TYPE_INPUT_REPLY),
-                        parent_header=reply["header"],
-                        content=dict(value=value),
-                        channel='stdin',
-                        metadata={},
-                        buffers={})
-                    self.sock.send(json.dumps(input_reply).encode())
+        with self._establish_ws_connection(connect_kwargs) as sock:
+            if sock is None:
+                return None
+            sock.send(json.dumps(message).encode())
+            replies = []
+            replied = False
+            while True:
+                # The code here requires refactoring.
+                # The code to interpret reply messages is devided into here and `JupyterReply` class.
+                # Maybe it's better choice to remove `JupyterReply` class and
+                # let all message interpretation processed here.
+                reply = json.loads(sock.recv())
+                replies.append(reply)
+                self._logger.info(reply)
+                msg_type = get_msg_type(reply)
+                if msg_type.endswith("_reply"):
+                    # Kernel sends status first, or XX_reply first?
+                    if self._execution_state == 'idle':
+                        break
+                    replied = True
+                if msg_type == MSG_TYPE_STATUS:
+                    self._execution_state = reply["content"]["execution_state"]
+                    if self._execution_state == 'idle' and replied:
+                        break
+                elif msg_type == MSG_TYPE_INPUT_REQUEST:
+                    content = reply["content"]
 
-                prompt = content["prompt"]
+                    def send_input(value):
+                        input_reply = dict(
+                            header=self._gen_header(MSG_TYPE_INPUT_REPLY),
+                            parent_header=reply["header"],
+                            content=dict(value=value),
+                            channel='stdin',
+                            metadata={},
+                            buffers={})
+                        sock.send(json.dumps(input_reply).encode())
 
-                def interrupt():
-                    self.manager.interrupt_kernel(self.kernel_id)
+                    prompt = content["prompt"]
 
-                if content["password"]:
-                    show_password_input(prompt, send_input, interrupt)
+                    def interrupt():
+                        self.manager.interrupt_kernel(self.kernel_id)
 
-                else:
-                    (
-                        sublime
-                        .active_window()
-                        .show_input_panel(
-                            prompt,
-                            "",
-                            send_input,
-                            lambda x: None,
-                            interrupt
+                    if content["password"]:
+                        show_password_input(prompt, send_input, interrupt)
+
+                    else:
+                        (
+                            sublime
+                            .active_window()
+                            .show_input_panel(
+                                prompt,
+                                "",
+                                send_input,
+                                lambda x: None,
+                                interrupt
+                            )
                         )
-                    )
 
         reply_obj = JupyterReply(replies, logger=self._logger)
         return reply_obj
@@ -532,7 +528,7 @@ class KernelConnection(object):
             self._write_phantom(content)
 
     def update_status_bar(self):
-        self._communicate()
+        self._async_communicate()
 
     def get_view(self):
         """Get view corresponds to the KernelConnection."""
