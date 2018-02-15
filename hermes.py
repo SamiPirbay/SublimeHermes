@@ -890,13 +890,9 @@ class HermesCompleter(EventListener):
             location = locations[0]
             code = view.substr(view.line(location))
             _, col = view.rowcol(location)
-            completions = sublime.set_timeout(
-                lambda: kernel.get_complete(code, col),
-                timeout
-            )
             return [
                 (completion + "\tHermes", completion)
                 for completion
-                in completions]
+                in kernel.get_complete(code, col, timeout)]
         except Exception:
             return None

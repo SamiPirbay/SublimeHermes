@@ -24,7 +24,6 @@ def chain_callbacks(keep_value=False):
         yielded by the given generator in order."""
         @wraps(f)
         def wrapper(*args, **kwargs):
-            print(f)
             gen = GeneratorWithReturnValue(f(*args, **kwargs))
             chain = iter(gen)
             value_queue = Queue(maxsize=1)

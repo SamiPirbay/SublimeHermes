@@ -6,7 +6,7 @@ Copyright (c) 2017, NEGORO Tetsuya (https://github.com/ngr-t)
 """
 
 from functools import partial
-from threading import Thread
+from threading import Lock, Thread
 from queue import Queue
 from urllib.parse import quote
 import json
@@ -247,6 +247,8 @@ class KernelConnection(object):
                 sublime
                 .load_settings("Hermes.sublime-settings")
                 .get("username", ""))
+        self.connection_lock = Lock()
+        self._establish_ws_connection()
 
     @property
     def lang(self):
@@ -294,45 +296,44 @@ class KernelConnection(object):
                 lang=self.lang,
                 kernel_id=self.kernel_id)
 
-    def _ping(self) -> bool:
-        try:
-            self.sock.ping()
-            frame = self.sock.recv_frame()
-            if frame.opcode == websocket.ABNF.OPCODE_PONG:
-                return True
-            return False
-        except Exception as ex:
-            return False
-
-    def _establish_ws_connection(self, connect_kwargs: dict=dict()) -> None:
+    def _establish_ws_connection(
+        self,
+        connect_kwargs: dict = dict()
+    ) -> None:
         try:
             response = self.manager.get_request(self._http_url)
             if response['id'] != self.kernel_id:
-                return None
+                self.sock = None
         except requests.RequestException:
-            return None
-        if self._auth_type == "no_auth":
-            sock = websocket.create_connection(
-                self._ws_url,
-                **connect_kwargs)
-        elif self._auth_type == "password":
-            sock = websocket.create_connection(
-                self._ws_url,
-                http_proxy_auth=self._auth_info,
-                **connect_kwargs)
-        elif self._auth_type == "token":
-            header_auth_body = "token {token}".format(
-                token=self._token)
-            header = dict(Authorization=header_auth_body)
-            sock = websocket.create_connection(
-                self._ws_url,
-                header=header)
-        return sock
-        if not self._ping():
-            # Connection can't be established (ex. when the kernel is dead)
-            # Should we show some message in this case,
-            # and let users to make a new connection?
-            return None
+            self.sock = None
+        except Exception as ex:
+            self.sock = None
+
+        if hasattr(self, 'sock') and self.sock is None:
+            return
+
+        while not self.connection_lock.acquire():
+            pass
+        print('creating new connection')
+        try:
+            if self._auth_type == "no_auth":
+                self.sock = websocket.create_connection(
+                    self._ws_url,
+                    **connect_kwargs)
+            elif self._auth_type == "password":
+                self.sock = websocket.create_connection(
+                    self._ws_url,
+                    http_proxy_auth=self._auth_info,
+                    **connect_kwargs)
+            elif self._auth_type == "token":
+                header_auth_body = "token {token}".format(
+                    token=self._token)
+                header = dict(Authorization=header_auth_body)
+                self.sock = websocket.create_connection(
+                    self._ws_url,
+                    header=header)
+        finally:
+            self.connection_lock.release()
 
     def _communicate(self, message, timeout=None) -> JupyterReply:
         """Send `message` to the kernel and return `reply` for it."""
@@ -342,10 +343,13 @@ class KernelConnection(object):
         else:
             connect_kwargs = dict()
 
-        with self._establish_ws_connection(connect_kwargs) as sock:
-            if sock is None:
+        if not self._ping():
+            self._establish_ws_connection(connect_kwargs)
+            if self.sock is None:
                 return None
-            sock.send(json.dumps(message).encode())
+
+        try:
+            self.sock.send(json.dumps(message).encode())
             replies = []
             replied = False
             while True:
@@ -353,7 +357,7 @@ class KernelConnection(object):
                 # The code to interpret reply messages is devided into here and `JupyterReply` class.
                 # Maybe it's better choice to remove `JupyterReply` class and
                 # let all message interpretation processed here.
-                reply = json.loads(sock.recv())
+                reply = json.loads(self.sock.recv())
                 replies.append(reply)
                 self._logger.info(reply)
                 msg_type = get_msg_type(reply)
@@ -377,7 +381,7 @@ class KernelConnection(object):
                             channel='stdin',
                             metadata={},
                             buffers={})
-                        sock.send(json.dumps(input_reply).encode())
+                        self.sock.send(json.dumps(input_reply).encode())
 
                     prompt = content["prompt"]
 
@@ -400,8 +404,10 @@ class KernelConnection(object):
                             )
                         )
 
-        reply_obj = JupyterReply(replies, logger=self._logger)
-        return reply_obj
+            reply_obj = JupyterReply(replies, logger=self._logger)
+            return reply_obj
+        finally:
+            self.sock.close()
 
     def _async_communicate(self, message, callback):
         self._async_communicator.message_queue.put((message, callback))
@@ -576,28 +582,44 @@ class KernelConnection(object):
         info_message = "Kernel executed code ```{code}```.".format(code=code)
         self._logger.info(info_message)
 
+    def _ping(self):
+        try:
+            self.sock.ping()
+            frame = self.sock.recv_frame()
+            if frame.opcode == websocket.ABNF.OPCODE_PONG:
+                return True
+            else:
+                return False
+        except:
+            return False
+
     def is_alive(self):
         """Return True if kernel is alive."""
         try:
-            self._establish_ws_connection()
-            if self.sock is not None:
-                return True
+            if self._ping():
+                value = True
             else:
-                self._execution_state = 'dead'
-                return False
+                self._establish_ws_connection()
+                if self.sock is not None:
+                    value = self._ping()
+                else:
+                    value = False
         except websocket.WebSocketException:
             # Now we consider the kernel dead if we can't connect via WebSocket.
             # There should be several case that kernel is not dead but we can't connect,
             # i.e. temporary bad condition of network. Should we distinguish these cases?
+            value = False
+
+        if not value:
             self._execution_state = 'dead'
-            return False
+        return value
 
     @property
     def execution_state(self):
         return self._execution_state
 
     @chain_callbacks(keep_value=True)
-    def get_complete(self, code, cursor_pos):
+    def get_complete(self, code, cursor_pos, timeout):
         """Generate complete request."""
         header = self._gen_header(MSG_TYPE_COMPLETE_REQUEST)
         content = dict(
@@ -614,7 +636,10 @@ class KernelConnection(object):
             content=content,
             metadata={},
             buffers={})
-        reply = yield partial(self._async_communicate, message)
+        reply = yield partial(
+            self._async_communicate,
+            message,
+        )
         return reply.matches
 
     def get_inspection(self, code, cursor_pos, detail_level=0, timeout=None):
